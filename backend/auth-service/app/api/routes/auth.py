@@ -18,6 +18,25 @@ from app.services.auth_service import (
     register_user,
 )
 
+from app.services.token_service import (
+    create_refresh_token,
+    get_refresh_token_expiry_seconds,
+)
+
+from app.schemas.auth import (
+    TokenResponse,
+    UserLoginRequest,
+    UserRegisterRequest,
+    UserResponse,
+    RefreshTokenRequest,
+)
+
+from app.services.token_service import (
+    create_refresh_token,
+    get_refresh_token_expiry_seconds,
+    rotate_refresh_token,
+    revoke_refresh_token,
+)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -41,10 +60,7 @@ def register(
         ) from exc
 
 
-@router.post(
-    "/login",
-    response_model=TokenResponse,
-)
+@router.post("/login", response_model=TokenResponse)
 def login(
     credentials: UserLoginRequest,
     db: Session = Depends(get_db),
@@ -63,12 +79,62 @@ def login(
         )
 
     access_token = generate_user_access_token(user)
+    refresh_token = create_refresh_token(db, user)
 
     return TokenResponse(
         access_token=access_token,
+        refresh_token=refresh_token,
         expires_in=get_access_token_expiry_seconds(),
+        refresh_expires_in=get_refresh_token_expiry_seconds(),
         user=user,
     )
+
+
+@router.post("/refresh", response_model=TokenResponse)
+def refresh_access_token(
+    request: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    result = rotate_refresh_token(db, request.refresh_token)
+
+    if result is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid, expired, or revoked refresh token.",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    new_refresh_token, user = result
+
+    new_access_token = generate_user_access_token(user)
+
+    return TokenResponse(
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
+        expires_in=get_access_token_expiry_seconds(),
+        refresh_expires_in=get_refresh_token_expiry_seconds(),
+        user=user,
+    )
+
+
+@router.post("/logout")
+def logout(
+    request: RefreshTokenRequest,
+    db: Session = Depends(get_db),
+):
+    revoked = revoke_refresh_token(db, request.refresh_token)
+
+    if not revoked:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or already revoked refresh token.",
+        )
+
+    return {
+        "message": "Successfully logged out."
+    }
+
+
 
 @router.get("/me", response_model=UserResponse)
 def get_my_profile(

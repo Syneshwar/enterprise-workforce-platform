@@ -7,6 +7,9 @@ from typing import Any
 
 from app.core.config import get_settings
 
+import hashlib
+import secrets
+
 
 settings = get_settings()
 
@@ -98,3 +101,14 @@ def decode_access_token(token: str) -> dict[str, Any] | None:
 
     except jwt.InvalidTokenError:
         return None
+
+
+def generate_refresh_token() -> str:
+    """Generate a cryptographically secure random refresh token."""
+    return secrets.token_urlsafe(64)
+
+
+def hash_refresh_token(token: str) -> str:
+    """Return the SHA-256 hash of a refresh token."""
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+

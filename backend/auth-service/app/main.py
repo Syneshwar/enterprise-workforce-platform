@@ -9,6 +9,8 @@ from app.core.config import get_settings
 from app.db.base import Base
 from app.db.session import engine
 
+from app.models import RefreshToken, User
+
 
 settings = get_settings()
 
