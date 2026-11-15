@@ -12,3 +12,6 @@ build/
 .idea/
 .vscode/
 *.log
+*.db
+*.sqlite
+*.sqlite3
