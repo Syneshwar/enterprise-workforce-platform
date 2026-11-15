@@ -1,10 +1,10 @@
-
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
-from app.api.dependencies import get_current_user
-from app.models.user import User
 
+from app.api.dependencies import get_current_user
+from app.core.config import get_settings
 from app.db.session import get_db
+from app.models.user import User
 from app.schemas.auth import (
     TokenResponse,
     UserLoginRequest,
@@ -17,28 +17,40 @@ from app.services.auth_service import (
     get_access_token_expiry_seconds,
     register_user,
 )
-
 from app.services.token_service import (
     create_refresh_token,
     get_refresh_token_expiry_seconds,
-)
-
-from app.schemas.auth import (
-    TokenResponse,
-    UserLoginRequest,
-    UserRegisterRequest,
-    UserResponse,
-    RefreshTokenRequest,
-)
-
-from app.services.token_service import (
-    create_refresh_token,
-    get_refresh_token_expiry_seconds,
-    rotate_refresh_token,
     revoke_refresh_token,
+    rotate_refresh_token,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
+
+settings = get_settings()
+
+
+def set_refresh_cookie(response: Response, refresh_token: str) -> None:
+    """Store the refresh token in a secure, HttpOnly cookie."""
+    response.set_cookie(
+        key="refresh_token",
+        value=refresh_token,
+        httponly=True,
+        secure=settings.refresh_cookie_secure,
+        samesite=settings.refresh_cookie_samesite,
+        max_age=get_refresh_token_expiry_seconds(),
+        path="/auth",
+    )
+
+
+def clear_refresh_cookie(response: Response) -> None:
+    """Remove the refresh-token cookie from the browser."""
+    response.delete_cookie(
+        key="refresh_token",
+        path="/auth",
+        httponly=True,
+        secure=settings.refresh_cookie_secure,
+        samesite=settings.refresh_cookie_samesite,
+    )
 
 
 @router.post(
@@ -52,7 +64,6 @@ def register(
 ):
     try:
         return register_user(db, user_data)
-
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -63,6 +74,7 @@ def register(
 @router.post("/login", response_model=TokenResponse)
 def login(
     credentials: UserLoginRequest,
+    response: Response,
     db: Session = Depends(get_db),
 ):
     user = authenticate_user(
@@ -78,66 +90,65 @@ def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    access_token = generate_user_access_token(user)
     refresh_token = create_refresh_token(db, user)
+    set_refresh_cookie(response, refresh_token)
 
     return TokenResponse(
-        access_token=access_token,
-        refresh_token=refresh_token,
+        access_token=generate_user_access_token(user),
+        token_type="bearer",
         expires_in=get_access_token_expiry_seconds(),
-        refresh_expires_in=get_refresh_token_expiry_seconds(),
         user=user,
     )
 
 
+@router.get("/me", response_model=UserResponse)
+def get_me(
+    current_user: User = Depends(get_current_user),
+):
+    return current_user
+
+
 @router.post("/refresh", response_model=TokenResponse)
 def refresh_access_token(
-    request: RefreshTokenRequest,
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
     db: Session = Depends(get_db),
 ):
-    result = rotate_refresh_token(db, request.refresh_token)
-
-    if result is None:
+    if not refresh_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid, expired, or revoked refresh token.",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Refresh token is missing.",
         )
 
-    new_refresh_token, user = result
+    rotated = rotate_refresh_token(db, refresh_token)
 
-    new_access_token = generate_user_access_token(user)
+    if rotated is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token is invalid, expired, or revoked.",
+        )
+
+    new_refresh_token, user = rotated
+
+    set_refresh_cookie(response, new_refresh_token)
 
     return TokenResponse(
-        access_token=new_access_token,
-        refresh_token=new_refresh_token,
+        access_token=generate_user_access_token(user),
+        token_type="bearer",
         expires_in=get_access_token_expiry_seconds(),
-        refresh_expires_in=get_refresh_token_expiry_seconds(),
         user=user,
     )
 
 
 @router.post("/logout")
 def logout(
-    request: RefreshTokenRequest,
+    response: Response,
+    refresh_token: str | None = Cookie(default=None),
     db: Session = Depends(get_db),
 ):
-    revoked = revoke_refresh_token(db, request.refresh_token)
+    if refresh_token:
+        revoke_refresh_token(db, refresh_token)
 
-    if not revoked:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid or already revoked refresh token.",
-        )
+    clear_refresh_cookie(response)
 
-    return {
-        "message": "Successfully logged out."
-    }
-
-
-
-@router.get("/me", response_model=UserResponse)
-def get_my_profile(
-    current_user: User = Depends(get_current_user),
-):
-    return current_user
+    return {"message": "Successfully logged out."}

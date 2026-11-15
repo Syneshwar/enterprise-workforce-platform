@@ -22,6 +22,9 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    refresh_cookie_secure: bool = False
+    refresh_cookie_samesite: str = "lax"
+
 
 @lru_cache
 def get_settings() -> Settings:

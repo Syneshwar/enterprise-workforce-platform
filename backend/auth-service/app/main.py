@@ -11,6 +11,8 @@ from app.db.session import engine
 
 from app.models import RefreshToken, User
 
+from fastapi.middleware.cors import CORSMiddleware
+
 
 settings = get_settings()
 
@@ -33,6 +35,14 @@ app = FastAPI(
     description="Authentication Service for Enterprise Workforce Platform",
     version="1.0.0",
     lifespan=lifespan,
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 
 app.include_router(auth_router)
