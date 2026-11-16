@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     refresh_cookie_secure: bool = False
     refresh_cookie_samesite: str = "lax"
 
+    csrf_secret_key: str = "development-only-change-this-csrf-secret-key"
+
+    allowed_origins: list[str] = ["http://localhost:5173"]
+
 
 @lru_cache
 def get_settings() -> Settings:

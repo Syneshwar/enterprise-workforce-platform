@@ -4,6 +4,25 @@ import axios, {
 
 import type { TokenResponse } from "../types/auth";
 
+function getCsrfToken(): string | null {
+  const csrfCookie = document.cookie
+    .split(";")
+    .map((cookie) => cookie.trim())
+    .find((cookie) => cookie.startsWith("csrf_token="));
+
+  if (!csrfCookie) {
+    return null;
+  }
+
+  try {
+    return decodeURIComponent(
+      csrfCookie.substring("csrf_token=".length)
+    );
+  } catch {
+    return null;
+  }
+}
+
 const api = axios.create({
   baseURL: import.meta.env.VITE_AUTH_API_URL,
   headers: {
@@ -32,6 +51,18 @@ export function setApiAccessToken(token: string | null): void {
 api.interceptors.request.use((config) => {
   if (accessToken) {
     config.headers.Authorization = `Bearer ${accessToken}`;
+  }
+
+  const method = config.method?.toLowerCase();
+
+  const unsafeMethods = ["post", "put", "patch", "delete"];
+
+  if (method && unsafeMethods.includes(method)) {
+    const csrfToken = getCsrfToken();
+
+    if (csrfToken) {
+      config.headers.set("X-CSRF-Token", csrfToken);
+    }
   }
 
   return config;

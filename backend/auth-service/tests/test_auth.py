@@ -8,6 +8,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from app.core.csrf import create_csrf_token
 from app.core.security import (
     create_access_token,
     generate_refresh_token,
@@ -17,6 +18,13 @@ from app.db.base import Base
 from app.db.session import get_db
 from app.main import app
 from app.models.refresh_token import RefreshToken
+
+
+# ---------------------------------------------------------
+# Test configuration
+# ---------------------------------------------------------
+
+TRUSTED_ORIGIN = "http://localhost:5173"
 
 
 @pytest.fixture
@@ -37,6 +45,7 @@ def client(monkeypatch):
 
     def override_get_db():
         db = TestingSessionLocal()
+
         try:
             yield db
         finally:
@@ -67,6 +76,10 @@ def db_session_context():
         db_generator.close()
 
 
+# ---------------------------------------------------------
+# Test helper functions
+# ---------------------------------------------------------
+
 def register_test_user(client):
     return client.post(
         "/auth/register",
@@ -95,6 +108,32 @@ def set_refresh_cookie(client, raw_token):
         raw_token,
         path="/auth",
     )
+
+
+def set_csrf_cookie(client, token=None):
+    """Set a valid CSRF cookie for protected requests."""
+    token = token or create_csrf_token()
+
+    client.cookies.set(
+        "csrf_token",
+        token,
+        path="/",
+    )
+
+    return token
+
+
+def csrf_headers(client):
+    """Return the trusted Origin and matching CSRF header."""
+    token = client.cookies.get("csrf_token")
+
+    if not token:
+        token = set_csrf_cookie(client)
+
+    return {
+        "Origin": TRUSTED_ORIGIN,
+        "X-CSRF-Token": token,
+    }
 
 
 # ---------------------------------------------------------
@@ -137,17 +176,31 @@ def test_user_login_success(client):
     assert response_data["access_token"]
     assert response_data["user"]["email"] == "test@example.com"
 
-    # Refresh token must not be exposed in the JSON response.
+    # Refresh token must not be exposed in JSON.
     assert "refresh_token" not in response_data
     assert "refresh_expires_in" not in response_data
 
     # Refresh token must be delivered as an HttpOnly cookie.
-    cookie_header = response.headers.get("set-cookie", "")
+    refresh_cookie_header = [
+        cookie
+        for cookie in response.headers.get_list("set-cookie")
+        if cookie.startswith("refresh_token=")
+    ]
 
-    assert "refresh_token=" in cookie_header
-    assert "httponly" in cookie_header.lower()
-
+    assert refresh_cookie_header
+    assert "httponly" in refresh_cookie_header[0].lower()
     assert client.cookies.get("refresh_token")
+
+    # CSRF token must be available to frontend JavaScript.
+    csrf_cookie_header = [
+        cookie
+        for cookie in response.headers.get_list("set-cookie")
+        if cookie.startswith("csrf_token=")
+    ]
+
+    assert csrf_cookie_header
+    assert "httponly" not in csrf_cookie_header[0].lower()
+    assert client.cookies.get("csrf_token")
 
 
 def test_login_with_wrong_password(client):
@@ -170,6 +223,7 @@ def test_login_with_wrong_password(client):
 
 def test_get_current_user_with_valid_token(client):
     register_test_user(client)
+
     login_response = login_test_user(client)
 
     token = login_response.json()["access_token"]
@@ -222,13 +276,16 @@ def test_get_current_user_with_expired_token(client):
 def test_refresh_token_rotation_success(client):
     register_test_user(client)
 
-    login_response = login_test_user(client)
+    login_test_user(client)
 
     old_refresh_token = client.cookies.get("refresh_token")
 
     assert old_refresh_token
 
-    response = client.post("/auth/refresh")
+    response = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert response.status_code == 200
 
@@ -246,7 +303,10 @@ def test_refresh_token_rotation_success(client):
     # Verify that the original token cannot be reused.
     set_refresh_cookie(client, old_refresh_token)
 
-    old_token_response = client.post("/auth/refresh")
+    old_token_response = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert old_token_response.status_code == 401
 
@@ -254,28 +314,38 @@ def test_refresh_token_rotation_success(client):
 def test_refresh_token_reuse_rejected(client):
     register_test_user(client)
 
-    login_response = login_test_user(client)
+    login_test_user(client)
 
     old_refresh_token = client.cookies.get("refresh_token")
 
     assert old_refresh_token
 
-    first_refresh = client.post("/auth/refresh")
+    first_refresh = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert first_refresh.status_code == 200
 
     # Attempt to reuse the original token.
     set_refresh_cookie(client, old_refresh_token)
 
-    second_refresh = client.post("/auth/refresh")
+    second_refresh = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert second_refresh.status_code == 401
 
 
 def test_refresh_with_invalid_token(client):
+    set_csrf_cookie(client)
     set_refresh_cookie(client, "invalid-refresh-token")
 
-    response = client.post("/auth/refresh")
+    response = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert response.status_code == 401
 
@@ -303,7 +373,10 @@ def test_refresh_with_expired_token(client):
 
     set_refresh_cookie(client, raw_token)
 
-    response = client.post("/auth/refresh")
+    response = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert response.status_code == 401
 
@@ -331,7 +404,10 @@ def test_refresh_with_revoked_token(client):
 
     set_refresh_cookie(client, raw_token)
 
-    response = client.post("/auth/refresh")
+    response = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert response.status_code == 401
 
@@ -349,13 +425,19 @@ def test_logout_success(client):
 
     assert refresh_token
 
-    response = client.post("/auth/logout")
+    response = client.post(
+        "/auth/logout",
+        headers=csrf_headers(client),
+    )
 
     assert response.status_code == 200
     assert response.json()["message"] == "Successfully logged out."
 
-    # Verify the cookie is cleared.
+    # Verify refresh cookie is cleared.
     assert client.cookies.get("refresh_token") is None
+
+    # Verify CSRF cookie is cleared.
+    assert client.cookies.get("csrf_token") is None
 
     # Verify that the database token has been revoked.
     with db_session_context() as db:
@@ -370,9 +452,13 @@ def test_logout_success(client):
 
 
 def test_logout_with_invalid_token(client):
+    set_csrf_cookie(client)
     set_refresh_cookie(client, "invalid-refresh-token")
 
-    response = client.post("/auth/logout")
+    response = client.post(
+        "/auth/logout",
+        headers=csrf_headers(client),
+    )
 
     # Logout is intentionally idempotent.
     assert response.status_code == 200
@@ -400,10 +486,14 @@ def test_logout_with_already_revoked_token(client):
         token_record.revoked_at = datetime.now(timezone.utc)
         db.commit()
 
-    response = client.post("/auth/logout")
+    response = client.post(
+        "/auth/logout",
+        headers=csrf_headers(client),
+    )
 
     assert response.status_code == 200
     assert client.cookies.get("refresh_token") is None
+    assert client.cookies.get("csrf_token") is None
 
 
 def test_refresh_after_logout_is_rejected(client):
@@ -411,11 +501,68 @@ def test_refresh_after_logout_is_rejected(client):
 
     login_test_user(client)
 
-    logout_response = client.post("/auth/logout")
+    logout_response = client.post(
+        "/auth/logout",
+        headers=csrf_headers(client),
+    )
 
     assert logout_response.status_code == 200
     assert client.cookies.get("refresh_token") is None
 
-    refresh_response = client.post("/auth/refresh")
+    # Logout clears the CSRF cookie. Set a fresh valid CSRF cookie
+    # so this test verifies the missing refresh token behavior.
+    set_csrf_cookie(client)
+
+    refresh_response = client.post(
+        "/auth/refresh",
+        headers=csrf_headers(client),
+    )
 
     assert refresh_response.status_code == 401
+
+
+# ---------------------------------------------------------
+# CSRF protection tests
+# ---------------------------------------------------------
+
+def test_refresh_without_csrf_header_rejected(client):
+    register_test_user(client)
+    login_test_user(client)
+
+    response = client.post(
+        "/auth/refresh",
+        headers={
+            "Origin": TRUSTED_ORIGIN,
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_refresh_with_invalid_origin_rejected(client):
+    register_test_user(client)
+    login_test_user(client)
+
+    response = client.post(
+        "/auth/refresh",
+        headers={
+            "Origin": "http://malicious.example",
+            "X-CSRF-Token": client.cookies.get("csrf_token"),
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_logout_without_csrf_header_rejected(client):
+    register_test_user(client)
+    login_test_user(client)
+
+    response = client.post(
+        "/auth/logout",
+        headers={
+            "Origin": TRUSTED_ORIGIN,
+        },
+    )
+
+    assert response.status_code == 403

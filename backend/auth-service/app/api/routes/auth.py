@@ -2,6 +2,7 @@ from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
+from app.core.csrf import create_csrf_token, validate_csrf_request
 from app.core.config import get_settings
 from app.db.session import get_db
 from app.models.user import User
@@ -22,6 +23,11 @@ from app.services.token_service import (
     get_refresh_token_expiry_seconds,
     revoke_refresh_token,
     rotate_refresh_token,
+)
+
+from app.core.csrf import (
+    create_csrf_token,
+    validate_csrf_request,
 )
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
@@ -48,6 +54,29 @@ def clear_refresh_cookie(response: Response) -> None:
         key="refresh_token",
         path="/auth",
         httponly=True,
+        secure=settings.refresh_cookie_secure,
+        samesite=settings.refresh_cookie_samesite,
+    )
+
+def set_csrf_cookie(response: Response) -> None:
+    csrf_token = create_csrf_token()
+
+    response.set_cookie(
+        key="csrf_token",
+        value=csrf_token,
+        httponly=False,
+        secure=settings.refresh_cookie_secure,
+        samesite=settings.refresh_cookie_samesite,
+        max_age=get_refresh_token_expiry_seconds(),
+        path="/",
+    )
+
+
+def clear_csrf_cookie(response: Response) -> None:
+    response.delete_cookie(
+        key="csrf_token",
+        path="/",
+        httponly=False,
         secure=settings.refresh_cookie_secure,
         samesite=settings.refresh_cookie_samesite,
     )
@@ -92,6 +121,7 @@ def login(
 
     refresh_token = create_refresh_token(db, user)
     set_refresh_cookie(response, refresh_token)
+    set_csrf_cookie(response)
 
     return TokenResponse(
         access_token=generate_user_access_token(user),
@@ -108,7 +138,11 @@ def get_me(
     return current_user
 
 
-@router.post("/refresh", response_model=TokenResponse)
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+    dependencies=[Depends(validate_csrf_request)],
+)
 def refresh_access_token(
     response: Response,
     refresh_token: str | None = Cookie(default=None),
@@ -131,6 +165,7 @@ def refresh_access_token(
     new_refresh_token, user = rotated
 
     set_refresh_cookie(response, new_refresh_token)
+    set_csrf_cookie(response)
 
     return TokenResponse(
         access_token=generate_user_access_token(user),
@@ -140,7 +175,10 @@ def refresh_access_token(
     )
 
 
-@router.post("/logout")
+@router.post(
+    "/logout",
+    dependencies=[Depends(validate_csrf_request)],
+)
 def logout(
     response: Response,
     refresh_token: str | None = Cookie(default=None),
@@ -150,5 +188,6 @@ def logout(
         revoke_refresh_token(db, refresh_token)
 
     clear_refresh_cookie(response)
+    clear_csrf_cookie(response)
 
     return {"message": "Successfully logged out."}
