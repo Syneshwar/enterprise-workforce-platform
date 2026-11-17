@@ -67,7 +67,13 @@ def authenticate_user(
 
 
 def generate_user_access_token(user: User) -> str:
-    return create_access_token(subject=str(user.id))
+    """
+    Generate an access token containing the user's identity and role.
+    """
+    return create_access_token(
+        subject=str(user.id),
+        role=user.role,
+    )
 
 
 def get_access_token_expiry_seconds() -> int:

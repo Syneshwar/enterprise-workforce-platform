@@ -51,6 +51,7 @@ def verify_password(
 
 def create_access_token(
     subject: str,
+    role: str | None = None,
     expires_delta: timedelta | None = None,
 ) -> str:
     """
@@ -72,12 +73,14 @@ def create_access_token(
         "type": "access",
     }
 
+    if role is not None:
+        payload["role"] = role
+
     return jwt.encode(
         payload,
         settings.jwt_secret_key,
         algorithm=settings.jwt_algorithm,
     )
-
 
 def decode_access_token(token: str) -> dict[str, Any] | None:
     """

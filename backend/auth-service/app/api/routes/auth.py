@@ -1,9 +1,20 @@
-from fastapi import APIRouter, Cookie, Depends, HTTPException, Response, status
+import secrets
+
+from fastapi import (
+    APIRouter,
+    Cookie,
+    Depends,
+    Header,
+    HTTPException,
+    Response,
+    status,
+)
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.dependencies import get_current_user
-from app.core.csrf import create_csrf_token, validate_csrf_request
 from app.core.config import get_settings
+from app.core.csrf import create_csrf_token, validate_csrf_request
 from app.db.session import get_db
 from app.models.user import User
 from app.schemas.auth import (
@@ -25,10 +36,6 @@ from app.services.token_service import (
     rotate_refresh_token,
 )
 
-from app.core.csrf import (
-    create_csrf_token,
-    validate_csrf_request,
-)
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -191,3 +198,46 @@ def logout(
     clear_csrf_cookie(response)
 
     return {"message": "Successfully logged out."}
+
+
+@router.get("/internal/users/{user_id}")
+def get_internal_user(
+    user_id: int,
+    service_key: str | None = Header(
+        default=None,
+        alias="X-Internal-Service-Key",
+    ),
+    db: Session = Depends(get_db),
+):
+    """
+    Verify an account for trusted internal microservice requests.
+    """
+
+    expected_key = settings.internal_service_api_key
+
+    if (
+        not service_key
+        or not secrets.compare_digest(service_key, expected_key)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid internal service credentials.",
+        )
+
+    user = db.scalar(
+        select(User).where(User.id == user_id)
+    )
+
+    if user is None or not user.is_active:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Active user account not found.",
+        )
+
+    return {
+        "id": user.id,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": user.role,
+        "is_active": user.is_active,
+    }

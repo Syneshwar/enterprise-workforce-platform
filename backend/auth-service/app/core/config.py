@@ -22,6 +22,8 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    internal_service_api_key: str
+
     refresh_cookie_secure: bool = False
     refresh_cookie_samesite: str = "lax"
 
